@@ -1,5 +1,12 @@
 """Central configuration. All knobs live here; ``.env`` provides their values.
 
+CONTRACT: ``.env`` is the single source of truth. Every key present in the file
+wins — unconditionally — over anything already in the environment (a shell
+export, a CI variable, a value a test set before importing this module). Nothing
+in the codebase mutates these values after load. This is intentional, not a
+quirk: do NOT change ``_load_dotenv`` to "only set if unset" or to let the shell
+override the file. If you need a different value, edit ``.env``.
+
 We deliberately avoid python-dotenv: a 15-line loader keeps the dependency
 list to two libraries (requests, rich), which is easier to justify in review.
 """
@@ -14,10 +21,12 @@ ROOT = Path(__file__).resolve().parent.parent
 def _load_dotenv(path: Path) -> None:
     """Load ``path`` into the environment, overriding any existing values.
 
-    The committed ``.env`` is the source of truth: a value in the file wins
-    over a variable already set in the shell. This avoids the surprising case
-    where a stale session variable (e.g. a leftover ``APIA_LLM_PROVIDER`` from
-    an earlier experiment) silently shadows what ``.env`` plainly says.
+    The committed ``.env`` is the source of truth: a value in the file ALWAYS
+    wins over a variable already set in the shell (see the module CONTRACT). This
+    avoids the surprising case where a stale session variable (e.g. a leftover
+    ``APIA_LLM_PROVIDER`` from an earlier experiment) silently shadows what
+    ``.env`` plainly says. The unconditional ``os.environ[key] = val`` below is
+    load-bearing — keep it unconditional.
     """
     if not path.exists():
         return
@@ -92,6 +101,9 @@ MAX_STEP_RETRIES = int(_get("APIA_MAX_STEP_RETRIES", "2"))
 # how many times a synthesised capability may be regenerated from its own
 # RUNTIME error (the self-healing loop) before the step is declared failed
 MAX_RUNTIME_REPAIRS = int(_get("APIA_MAX_RUNTIME_REPAIRS", "2"))
+# how many times a step (built-in OR synthesised) may have its ARGUMENTS
+# self-healed after a validation/type error before the step is declared failed
+MAX_ARG_REPAIRS = int(_get("APIA_MAX_ARG_REPAIRS", "2"))
 PROMOTE_AFTER = int(_get("APIA_PROMOTE_AFTER", "3"))   # successes to reach 'trusted'
 DEPRECATE_AFTER = int(_get("APIA_DEPRECATE_AFTER", "2"))  # consecutive failures to deprecate
 COMPACT_AFTER = int(_get("APIA_COMPACT_AFTER", "8"))  # detail rows per signature before compaction

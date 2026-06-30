@@ -14,11 +14,12 @@ Responsibilities:
 """
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Optional
 
 from . import config
-from .platform.base_capabilities import BUILTINS
+from .platform.base_capabilities import BUILTINS, BUILTIN_SIGNATURES
 from .platform import GitHubError
 from .runctx import Ctx
 from .schemas import Step, Plan, ExecutionReport
@@ -27,10 +28,58 @@ from .synthesis import SynthesisAgent
 # capability name -> underlying mutating op (for constraint prechecks)
 OP_OF = {"create_label": "create_label"}
 
+# Built-in params GitHub requires to be plain strings. If an upstream step's
+# whole result (a dict/list) got threaded into one of these — the classic
+# planner slip of {"$step": N} instead of {"$step": N, "get": "..."} — we unwrap
+# it to a string at the call boundary rather than letting the API reject it.
+STRING_PARAMS = {
+    "create_issue": ("title", "body"),
+    "update_issue": ("title", "body"),
+    "add_comment": ("body",),
+    "create_label": ("name", "color"),
+}
+# keys a wrapper dict commonly hides its text under, tried in order
+_TEXT_KEYS = ("body", "text", "content", "markdown", "md", "checklist",
+              "summary", "message", "value", "result", "output")
+
+_ARG_REPAIR_SYSTEM = """You fix the ARGUMENTS of one failed step in a GitHub
+automation agent. You are given the capability and its signature, the arguments
+that failed, the results of the upstream steps it depends on, and the platform
+error. Return ONLY JSON: {"args": { ...corrected arguments... }}.
+Rules:
+- Keep the SAME capability; change only the arguments.
+- A parameter typed `str` (e.g. title, body, name) must be a STRING, never an
+  object or array. If the value is wrapped in an object, inline the inner string.
+- Use ids/values that actually appear in the upstream results; never invent an
+  issue number or a value that isn't there.
+- If you cannot determine a valid fix, return {"args": null}."""
+
+
+def _coerce_str(value):
+    """Turn a dict/list accidentally threaded into a string-typed param into a
+    string. Strings/None pass through untouched, so this is a safe no-op when
+    the arg was already correct."""
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for k in _TEXT_KEYS:
+            if isinstance(value.get(k), str):
+                return value[k]
+        strs = [v for v in value.values() if isinstance(v, str)]
+        if len(strs) == 1:
+            return strs[0]
+        return json.dumps(value, indent=2, default=str)
+    if isinstance(value, list):
+        if all(isinstance(x, str) for x in value):
+            return "\n".join(value)
+        return json.dumps(value, indent=2, default=str)
+    return str(value)
+
 
 class ExecutionAgent:
     def __init__(self, gh, llm, memory, instruction_id: int, log):
         self.gh = gh
+        self.llm = llm
         self.memory = memory
         self.instruction_id = instruction_id
         self.log = log
@@ -57,6 +106,13 @@ class ExecutionAgent:
             self._execute_step(step, results, plan, report)
             if step.status == "done":
                 report.done.append(step.description)
+                # Surface any GitHub URL the step produced so the user gets a
+                # direct link instead of hunting in GitHub's eventually-consistent
+                # Issues list (which can lag a created issue by a minute or two).
+                if isinstance(step.result, dict):
+                    url = step.result.get("html_url")
+                    if isinstance(url, str) and url not in report.links:
+                        report.links.append(url)
 
         # finalise status
         if report.failed and report.done:
@@ -98,9 +154,13 @@ class ExecutionAgent:
         step.synthesised = synthesised
 
         args = self._resolve_args(step.args, results)
+        # Pre-emptively unwrap a whole-result dict/list threaded into a string
+        # param (zero-cost fix for the most common planner slip).
+        args = self._coerce_builtin_args(step.capability, args)
         spec = self._spec_for(step)
         gh_retries = config.MAX_STEP_RETRIES
         gh_attempt = 0
+        arg_repairs_left = config.MAX_ARG_REPAIRS
         # Only synthesised capabilities can be self-healed: a runtime error in one
         # is a defect the read-only selftest could not catch, so we feed it back to
         # the synthesiser and retry the regenerated code. Built-in failures are our
@@ -129,6 +189,14 @@ class ExecutionAgent:
                     results[step.idx] = {"satisfied": True}
                     return
                 step.error = e.message
+                # A 4xx validation/type rejection is usually a bad PAYLOAD, not a
+                # transient fault — try to self-heal the arguments and retry.
+                if handled == "fail" and e.status in (400, 422) and arg_repairs_left > 0:
+                    new_args = self._repair_args(step, args, e.message, results, report)
+                    if new_args is not None:
+                        arg_repairs_left -= 1
+                        args = new_args
+                        continue
                 gh_attempt += 1
                 if handled == "retry" and gh_attempt <= gh_retries:
                     continue
@@ -142,6 +210,14 @@ class ExecutionAgent:
                     fn = new_fn
                     step.synthesised = True
                     continue
+                # Arg-level self-heal works for built-ins too: a TypeError/KeyError
+                # from a bad payload shape is fixable by fixing the args, not code.
+                if arg_repairs_left > 0:
+                    new_args = self._repair_args(step, args, step.error, results, report)
+                    if new_args is not None:
+                        arg_repairs_left -= 1
+                        args = new_args
+                        continue
                 break
 
         # exhausted
@@ -258,12 +334,84 @@ class ExecutionAgent:
                 f"Capability `{capability}` {before['status']} → {new_status}.")
 
     @staticmethod
+    def _coerce_builtin_args(capability: str, args: dict) -> dict:
+        """Unwrap dict/list values that landed in a string-typed built-in param.
+        No-op for synthesised capabilities and for already-correct args."""
+        params = STRING_PARAMS.get(capability)
+        if not params:
+            return args
+        out = dict(args)
+        for p in params:
+            if p in out:
+                out[p] = _coerce_str(out[p])
+        return out
+
+    def _repair_args(self, step: Step, args: dict, error: str,
+                     results: dict, report: ExecutionReport) -> Optional[dict]:
+        """Self-heal a step by CORRECTING ITS ARGUMENTS — works for built-ins and
+        synthesised capabilities alike, since the fix is the payload, not the
+        code. Hands the model the signature/spec, the failing args, a digest of
+        the upstream results it can draw on, and the error. Never raises: any LLM
+        or parse failure degrades to None so the run still finishes."""
+        sig = BUILTIN_SIGNATURES.get(step.capability) or f"  # {self._spec_for(step)}"
+        upstream = self._upstream_digest(step, results)
+        user = (f"Capability: {step.capability}{sig}\n"
+                f"Arguments passed (FAILED): {json.dumps(args, default=str)[:1200]}\n"
+                f"Results of the steps it depends on (draw correct values from these):\n"
+                f"{json.dumps(upstream, default=str)[:1500]}\n"
+                f"Platform error: {error}\n\n"
+                "Return the corrected arguments as JSON.")
+        try:
+            data = self.llm.complete_json(_ARG_REPAIR_SYSTEM, user, max_tokens=700)
+        except Exception as e:
+            report.decisions.append(
+                f"Arg-repair for `{step.capability}` unavailable ({type(e).__name__}); "
+                "leaving step failed.")
+            return None
+        new = data.get("args") if isinstance(data, dict) else None
+        if not isinstance(new, dict) or new == args:
+            return None
+        new = self._coerce_builtin_args(step.capability, new)
+        msg = f"Self-healed args for `{step.capability}` after error: {error[:80]}"
+        report.self_healed.append(msg)
+        report.decisions.append(msg)
+        return new
+
+    @staticmethod
+    def _upstream_digest(step: Step, results: dict) -> dict:
+        return {d: ExecutionAgent._shape(results.get(d)) for d in step.depends_on}
+
+    @staticmethod
+    def _shape(v: Any) -> Any:
+        """A compact, size-bounded view of a value so the repair model can see
+        what keys/values upstream produced without flooding the prompt."""
+        if isinstance(v, dict):
+            return {k: ExecutionAgent._shape(x) for k, x in list(v.items())[:12]}
+        if isinstance(v, list):
+            if not v:
+                return []
+            head = [ExecutionAgent._shape(v[0])]
+            return head + [f"...+{len(v) - 1} more"] if len(v) > 1 else head
+        if isinstance(v, str):
+            return v if len(v) <= 200 else v[:200] + "…"
+        return v
+
+    @staticmethod
     def _resolve_args(args: dict, results: dict) -> dict:
         out = {}
         for k, v in (args or {}).items():
             if isinstance(v, dict) and "$step" in v:
                 base = results.get(v["$step"])
-                out[k] = base.get(v["get"]) if (isinstance(base, dict) and "get" in v) else base
+                if isinstance(base, dict) and "get" in v:
+                    key = v["get"]
+                    # If the planner guessed a key the upstream result doesn't
+                    # actually have (common for synthesised capabilities whose
+                    # output shape it can't see), don't silently yield None and
+                    # write an empty payload — fall back to the whole result so
+                    # downstream coercion can still pull the right value out.
+                    out[k] = base[key] if key in base else base
+                else:
+                    out[k] = base
             else:
                 out[k] = v
         return out

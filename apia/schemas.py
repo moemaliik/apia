@@ -56,6 +56,8 @@ class ExecutionReport:
     failed: list[dict] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
     decisions: list[str] = field(default_factory=list)
+    self_healed: list[str] = field(default_factory=list)
+    links: list[str] = field(default_factory=list)
     synthesised: list[str] = field(default_factory=list)
     constraints_learned: list[str] = field(default_factory=list)
     lessons: list[str] = field(default_factory=list)
@@ -85,6 +87,12 @@ class ExecutionReport:
         if self.blocked:
             lines.append("Blocked (upstream failure):")
             lines += [f"  ⊘ {b}" for b in self.blocked]
+        if self.links:
+            lines.append("Links:")
+            lines += [f"  → {u}" for u in self.links]
+        if self.self_healed:
+            lines.append("Self-healed this run:")
+            lines += [f"  ↻ {h}" for h in self.self_healed]
         if self.synthesised:
             lines.append(f"Synthesised capabilities: {', '.join(self.synthesised)}")
         if self.constraints_learned:
