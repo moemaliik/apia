@@ -50,6 +50,19 @@ class SandboxError(RuntimeError):
     pass
 
 
+def _attr_chain(node: ast.AST) -> str | None:
+    """Return the dotted source path for an attribute/name node, e.g.
+    `ctx.gh.request`, or None if it isn't a plain attribute chain."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
 def validate(source: str) -> None:
     try:
         tree = ast.parse(source)
@@ -65,6 +78,18 @@ def validate(source: str) -> None:
             raise SandboxError(f"dunder attribute access not allowed: {node.attr}")
         if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
             raise SandboxError(f"name not allowed: {node.id}")
+        # Forbid stubbing the platform handle (e.g. `ctx.gh.request = mock`).
+        # A selftest that monkeypatches ctx.gh proves nothing — it just confirms
+        # the author's own assumptions about the data shape.
+        targets = []
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for tgt in targets:
+            chain = _attr_chain(tgt)
+            if chain and (chain == "ctx.gh" or chain.startswith("ctx.gh.")):
+                raise SandboxError(
+                    f"reassigning the platform handle is not allowed: {chain} "
+                    "(selftests must exercise the real ctx.gh, not a stub)")
 
 
 def compile_capability(source: str, fn_name: str = "capability") -> Callable:

@@ -34,15 +34,36 @@ HARD RULES
   success (never a dict, never the capability's output). selftest MUST be
   read-only (no create/update/delete) — exercise parsing/grouping/filtering
   logic on data fetched read-only (or on a small in-line sample).
+- selftest MUST exercise the capability against the REAL platform. NEVER
+  reassign, monkeypatch, wrap, or otherwise replace ctx.gh / ctx.gh.request
+  (e.g. `ctx.gh.request = mock` is forbidden). A selftest that stubs the
+  platform proves nothing — it only confirms your own assumptions about the
+  data shape, so a wrong assumption passes the test and then crashes for real.
+  Either call the capability directly (it will hit the live read-only API) or
+  test pure helper logic on an in-line literal sample WITHOUT touching ctx.gh.
 - The ONLY way to touch GitHub is ctx.gh.request(method, path, json_body=None, params=None).
   Paths use the literal token {repo}, e.g. "/repos/{repo}/issues" — write {repo}
   verbatim; ctx.gh expands it. There is NO ctx.repo needed in paths (ctx.repo
   exists but you should prefer the {repo} token). NEVER use ctx.gh.repo.
+- ctx.gh.request returns the RAW GitHub JSON, NOT the wrapped shape the
+  built-ins return. In particular:
+    * GET /repos/{repo}/issues       -> a LIST of issue dicts (NOT {"issues":[...]})
+    * GET /repos/{repo}/labels       -> a LIST of label dicts
+    * GET /repos/{repo}/issues/{n}   -> a single issue dict
+    * GET /repos/{repo}              -> a repo dict
+  Each issue dict has keys like number, title, state, labels (list of {"name":..}),
+  assignee (a dict or None), assignees (list). The {"issues":[...], "count":N}
+  / {"labels":[...], "names":[...]} shapes below belong to the BUILT-IN wrappers
+  only — do NOT expect ctx.gh.request to return them. If you want the wrapped
+  shape, the simplest path is to NOT re-fetch and instead consume the upstream
+  step's result via kwargs.
 - You MAY import only: json, re, datetime, collections, math.
 - No file, network (other than ctx.gh), os, subprocess, eval/exec/open.
 - Keep it small and defensive. Handle empty lists. Never raise on normal data.
 
-AVAILABLE PRIMITIVES (you can call ctx.gh.request directly OR rely on these patterns):
+AVAILABLE PRIMITIVES (you can call ctx.gh.request directly OR rely on these patterns).
+NOTE: the shapes shown here are the BUILT-IN return shapes; ctx.gh.request
+returns raw JSON as described above, not these wrappers:
 %s
 
 You may also read ctx.known_labels() -> list[str].
