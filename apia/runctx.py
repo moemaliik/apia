@@ -13,6 +13,9 @@ from typing import Any, Callable
 class Ctx:
     def __init__(self, gh, memory, instruction_id: int, logger: Callable[[str], None]):
         self.gh = gh
+        # The bare "owner/repo" string. Synthesised code may use ctx.repo, though
+        # the literal {repo} token in a path is preferred (gh.request expands it).
+        self.repo = getattr(gh, "repo", None)
         self.memory = memory
         self.instruction_id = instruction_id
         self._log = logger

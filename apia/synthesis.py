@@ -30,11 +30,14 @@ composing low-level primitives. You also write a selftest.
 
 HARD RULES
 - Define exactly: def capability(ctx, **kwargs): ...  returning a dict.
-- Define: def selftest(ctx): ... returning True if the capability is wired
-  correctly. selftest MUST be read-only (no create/update/delete) — it should
-  exercise parsing/grouping/filtering logic on data fetched read-only.
+- Define: def selftest(ctx): ... It MUST return the literal boolean True on
+  success (never a dict, never the capability's output). selftest MUST be
+  read-only (no create/update/delete) — exercise parsing/grouping/filtering
+  logic on data fetched read-only (or on a small in-line sample).
 - The ONLY way to touch GitHub is ctx.gh.request(method, path, json_body=None, params=None).
-  Paths use the literal token {repo}, e.g. "/repos/{repo}/issues".
+  Paths use the literal token {repo}, e.g. "/repos/{repo}/issues" — write {repo}
+  verbatim; ctx.gh expands it. There is NO ctx.repo needed in paths (ctx.repo
+  exists but you should prefer the {repo} token). NEVER use ctx.gh.repo.
 - You MAY import only: json, re, datetime, collections, math.
 - No file, network (other than ctx.gh), os, subprocess, eval/exec/open.
 - Keep it small and defensive. Handle empty lists. Never raise on normal data.

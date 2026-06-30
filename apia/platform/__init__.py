@@ -53,11 +53,26 @@ class RealTransport:
             json=json_body, params=params, timeout=60,
         )
         if r.status_code >= 400:
+            payload = None
             try:
-                msg = r.json().get("message", r.text)
+                payload = r.json() if r.content else None
             except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                msg = payload.get("message", r.text)
+                # GitHub buries the actionable code (e.g. "already_exists") in
+                # errors[].code — fold it into the message so handlers that match
+                # on the message text behave the same against real and mock.
+                errs = payload.get("errors") or []
+                detail = "; ".join(
+                    " ".join(str(e.get(k)) for k in ("resource", "field", "code") if e.get(k))
+                    if isinstance(e, dict) else str(e)
+                    for e in errs).strip()
+                if detail:
+                    msg = f"{msg} ({detail})"
+            else:
                 msg = r.text
-            raise GitHubError(r.status_code, msg, r.json() if r.content else None)
+            raise GitHubError(r.status_code, msg, payload)
         return r.json() if r.content else {}
 
 

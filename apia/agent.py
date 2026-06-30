@@ -45,7 +45,22 @@ class Agent:
         iid = self.memory.start_instruction(instruction, sig)
         self._log(f"signature='{sig}'  run #{run_no}")
 
-        plan = planner.plan(instruction)
+        try:
+            plan = planner.plan(instruction)
+        except LLMError as e:
+            # Planning needs the LLM; if it's unreachable (quota/network) we can't
+            # decompose. Fail cleanly with a report instead of crashing the run.
+            self._log(f"planning failed: {e}")
+            report = ExecutionReport(instruction=instruction, instruction_id=iid,
+                                     status="failed", confidence=0.05)
+            report.failed.append({"step": "Plan the instruction",
+                                  "why": f"LLM unavailable: {e}",
+                                  "decision": "aborted before execution"})
+            report.metrics = meter.snapshot()
+            report.rollback_token = iid
+            self.memory.finish_instruction(iid, "failed", report.metrics)
+            self.memory.record_run_metric(sig, run_no, report.metrics, "fresh")
+            return report
         self._log(f"plan source = {plan.source.upper()}  ({len(plan.steps)} steps, "
                   f"{'0 planning LLM calls' if plan.source == 'reused' else '1 planning LLM call'})")
 

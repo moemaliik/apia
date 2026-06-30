@@ -170,10 +170,20 @@ class ExecutionAgent:
             self._label_cache = self.ctx.known_labels()  # one fetch, then cached
         return name in self._label_cache
 
+    @staticmethod
+    def _is_already_exists(e: GitHubError) -> bool:
+        """True if a 422 means 'the resource already exists' — works whether the
+        signal is in the message text (mock) or in errors[].code (real GitHub)."""
+        if "already_exists" in (e.message or "").lower():
+            return True
+        payload = e.payload if isinstance(e.payload, dict) else {}
+        return any(isinstance(err, dict) and err.get("code") == "already_exists"
+                   for err in (payload.get("errors") or []))
+
     def _handle_github_error(self, e: GitHubError, step: Step, op: Optional[str],
                              report: ExecutionReport) -> str:
         msg = (e.message or "").lower()
-        if e.status == 422 and "already_exists" in msg and op == "create_label":
+        if e.status == 422 and op == "create_label" and self._is_already_exists(e):
             new = self.memory.add_constraint(
                 op, {"precheck": "label_exists", "key": "name"},
                 evidence=f"422 already_exists for {step.args.get('name')}")

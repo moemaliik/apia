@@ -25,8 +25,23 @@ the agent will synthesise at runtime. Prefer built-ins for atomic CRUD; invent a
 new capability ONLY for compound logic (filtering by a predicate, grouping/
 bucketing, batch operations over many issues, rendering a summary, computing age).
 
+Steps are numbered by their 0-based position in the array: the first step is 0,
+the second is 1, and so on. Use that index in `depends_on` and in `$step`.
+
 To pass data between steps, set an arg to {"$step": N} for the whole result of
-step N, or {"$step": N, "get": "key"} for one key of it.
+step N, or {"$step": N, "get": "key"} for one key of it. NEVER hardcode an id
+(issue number, etc.) that an earlier step produces — always thread it via $step.
+
+Example — "create an issue titled 'X' and label it bug":
+[
+  {"description": "Create the issue", "capability": "create_issue",
+   "args": {"title": "X", "labels": ["bug"]}, "depends_on": []}
+]
+create_issue accepts labels directly, so one step suffices. If you instead label
+in a separate step, thread the number:
+  {"capability": "add_labels_to_issue",
+   "args": {"number": {"$step": 0, "get": "number"}, "labels": ["bug"]},
+   "depends_on": [0]}
 
 BUILT-INS:
 %s
