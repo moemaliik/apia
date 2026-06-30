@@ -43,6 +43,23 @@ in a separate step, thread the number:
    "args": {"number": {"$step": 0, "get": "number"}, "labels": ["bug"]},
    "depends_on": [0]}
 
+FAN-OUT (acting on MANY issues, e.g. "add label L to EACH/EVERY issue with no
+assignee"): a step that produces a LIST cannot be threaded into a single-issue
+capability. NEVER do {"$step": N, "get": "number"} when step N returns a list —
+that yields one bogus id and 404s. Use a batch capability that takes the whole
+list. Example:
+[
+  {"description": "List open issues", "capability": "list_open_issues",
+   "args": {}, "depends_on": []},
+  {"description": "Filter issues with no assignee", "capability": "filter_unassigned",
+   "args": {"issues": {"$step": 0, "get": "issues"}}, "depends_on": [0]},
+  {"description": "Ensure label L exists", "capability": "create_label",
+   "args": {"name": "L"}, "depends_on": []},
+  {"description": "Add L to each filtered issue", "capability": "batch_add_labels",
+   "args": {"issues": {"$step": 1, "get": "issues"}, "label": "L"},
+   "depends_on": [1, 2]}
+]
+
 BUILT-INS:
 %s
 

@@ -49,6 +49,27 @@ def add_labels_to_issue(ctx, number: int, labels: list, **_):
     return out
 
 
+def batch_add_labels(ctx, issues, label=None, labels=None, **_):
+    """Add a label (or labels) to EVERY issue in a list — the fan-out the planner
+    needs for "...to each issue". Accepts `issues` as a list of issue dicts (each
+    with a `number`), a list of bare issue numbers, or the wrapper dict
+    {"issues": [...]} that the filter capabilities return. Delegates to
+    add_labels_to_issue per issue, so each application is idempotent (labels are
+    merged) and individually undoable.
+    """
+    to_apply = sorted(set((labels or []) + ([label] if label else [])))
+    if isinstance(issues, dict):
+        issues = issues.get("issues", [])
+    numbers = []
+    for it in issues or []:
+        n = it.get("number") if isinstance(it, dict) else it
+        if n is not None:
+            numbers.append(n)
+    for n in numbers:
+        add_labels_to_issue(ctx, number=n, labels=to_apply)
+    return {"labeled": numbers, "count": len(numbers), "labels": to_apply}
+
+
 def list_labels(ctx, **_):
     labels = ctx.gh.request("GET", "/repos/{repo}/labels")
     return {"labels": labels, "names": [l["name"] for l in labels]}
@@ -73,6 +94,7 @@ BUILTINS: dict[str, Callable[..., Any]] = {
     "create_issue": create_issue,
     "update_issue": update_issue,
     "add_labels_to_issue": add_labels_to_issue,
+    "batch_add_labels": batch_add_labels,
     "list_labels": list_labels,
     "create_label": create_label,
     "add_comment": add_comment,
@@ -86,6 +108,7 @@ BUILTIN_SIGNATURES = {
     "create_issue": "(title:str, body:str='', labels:list=[]) -> issue",
     "update_issue": "(number:int, **fields) -> issue   # title/body/state",
     "add_labels_to_issue": "(number:int, labels:list) -> issue   # merges, idempotent",
+    "batch_add_labels": "(issues:list, label:str) -> {labeled:[...], count:int}   # add a label to EVERY issue in the list (use for 'label each ...'); issues is a list of issue dicts",
     "list_labels": "() -> {labels:[...], names:[...]}",
     "create_label": "(name:str, color:str='ededed') -> label   # 422 if already exists",
     "add_comment": "(number:int, body:str) -> comment",

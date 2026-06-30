@@ -11,6 +11,7 @@ outside the GitHub client.
 from __future__ import annotations
 
 import ast
+import builtins as _builtins
 import collections
 import datetime
 import json
@@ -19,18 +20,29 @@ import re
 from typing import Callable
 
 ALLOWED_IMPORTS = {"json", "re", "datetime", "collections", "math"}
+# Pure-computation stdlib helpers that the allowed modules import lazily or
+# internally (no filesystem/network). datetime.strptime, for example, does a
+# lazy `import _strptime`, which in turn imports `time` and `calendar`; without
+# these the obvious way to parse an ISO timestamp raises ImportError *inside*
+# the sandbox even though the synthesised source only ever imported `datetime`.
+_ALLOWED_INTERNAL = {"time", "_strptime", "calendar", "_datetime",
+                     "itertools", "operator", "functools", "types",
+                     "_collections", "_collections_abc", "keyword", "reprlib",
+                     "heapq", "_json", "copyreg", "_locale"}
 FORBIDDEN_NAMES = {"open", "exec", "eval", "compile", "__import__", "globals",
                    "locals", "vars", "input", "breakpoint", "memoryview"}
 
 SAFE_MODULES = {"json": json, "re": re, "datetime": datetime,
                 "collections": collections, "math": math}
 
+_REAL_IMPORT = _builtins.__import__
 
-def _safe_import(name, *_a, **_k):
+
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
     root = name.split(".")[0]
-    if root not in ALLOWED_IMPORTS:
-        raise ImportError(f"import not allowed: {name}")
-    return SAFE_MODULES[root]
+    if root in ALLOWED_IMPORTS or root in _ALLOWED_INTERNAL:
+        return _REAL_IMPORT(name, globals, locals, fromlist, level)
+    raise ImportError(f"import not allowed: {name}")
 
 
 SAFE_BUILTINS = {
@@ -42,7 +54,14 @@ SAFE_BUILTINS = {
     "False": False, "None": None, "isinstance": isinstance, "print": print,
     "Exception": Exception, "ValueError": ValueError, "KeyError": KeyError,
     "TypeError": TypeError, "IndexError": IndexError, "AttributeError": AttributeError,
+    "StopIteration": StopIteration, "frozenset": frozenset, "repr": repr,
+    "next": next, "iter": iter, "divmod": divmod, "chr": chr, "ord": ord,
     "__import__": _safe_import,
+    # the `class` statement compiles to a LOAD_BUILD_CLASS; without this any
+    # synthesised code that defines a helper class fails with "__build_class__
+    # not found". Escapes via class internals are still blocked by the AST
+    # dunder-attribute check in validate().
+    "__build_class__": _builtins.__build_class__,
 }
 
 
@@ -95,7 +114,8 @@ def validate(source: str) -> None:
 def compile_capability(source: str, fn_name: str = "capability") -> Callable:
     """Validate then compile `source`, returning the callable `fn_name`."""
     validate(source)
-    sandbox_globals = {"__builtins__": SAFE_BUILTINS, **SAFE_MODULES}
+    sandbox_globals = {"__builtins__": SAFE_BUILTINS, "__name__": "synthesised",
+                       **SAFE_MODULES}
     try:
         exec(compile(source, "<synthesised>", "exec"), sandbox_globals)
     except Exception as e:

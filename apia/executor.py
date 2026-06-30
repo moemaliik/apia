@@ -92,15 +92,22 @@ class ExecutionAgent:
             step.status = "failed"
             step.error = "capability unavailable (synthesis failed)"
             report.failed.append({"step": step.description, "why": step.error,
-                                  "decision": "reported gap; downstream steps blocked"})
+                                  "decision": f"reported gap{self._dependents_note(step, plan)}"})
             self.gh.meter.fail()
             return
         step.synthesised = synthesised
 
         args = self._resolve_args(step.args, results)
-        retries = config.MAX_STEP_RETRIES
-        for attempt in range(1, retries + 2):
-            step.attempts = attempt
+        spec = self._spec_for(step)
+        gh_retries = config.MAX_STEP_RETRIES
+        gh_attempt = 0
+        # Only synthesised capabilities can be self-healed: a runtime error in one
+        # is a defect the read-only selftest could not catch, so we feed it back to
+        # the synthesiser and retry the regenerated code. Built-in failures are our
+        # bug, not the model's, so they are never "repaired" this way.
+        repairs_left = 0 if step.capability in BUILTINS else config.MAX_RUNTIME_REPAIRS
+        while True:
+            step.attempts += 1
             api_before = self.gh.meter.api_calls
             try:
                 step.result = fn(self.ctx, **args)
@@ -122,11 +129,19 @@ class ExecutionAgent:
                     results[step.idx] = {"satisfied": True}
                     return
                 step.error = e.message
-                if attempt <= retries and handled == "retry":
+                gh_attempt += 1
+                if handled == "retry" and gh_attempt <= gh_retries:
                     continue
                 break
-            except Exception as e:  # synthesised code or arg error
+            except Exception as e:  # bug in synthesised code or bad args
                 step.error = f"{type(e).__name__}: {e}"
+                new_fn = (self._repair_capability(step, spec, e, args, report)
+                          if repairs_left > 0 else None)
+                if new_fn is not None:
+                    repairs_left -= 1
+                    fn = new_fn
+                    step.synthesised = True
+                    continue
                 break
 
         # exhausted
@@ -138,9 +153,41 @@ class ExecutionAgent:
                                           False, step.wall_ms, step.error)
         self._bump_lifecycle(step.capability, False, report)
         report.failed.append({"step": step.description, "why": step.error,
-                              "decision": "retries exhausted; dependents blocked"})
+                              "decision": f"retries exhausted{self._dependents_note(step, plan)}"})
 
     # ---- helpers ---------------------------------------------------------
+    def _spec_for(self, step: Step) -> str:
+        cached = self.memory.get_capability(step.capability)
+        return cached["spec"] if cached else step.description
+
+    def _repair_capability(self, step: Step, spec: str, exc: Exception,
+                           args: dict, report: ExecutionReport):
+        """Self-heal: hand the runtime error back to the synthesiser, which
+        regenerates the capability. Returns the new callable, or None if repair
+        failed. The regenerated version must still pass selftest before it runs."""
+        err = f"{type(exc).__name__}: {exc}"
+        res = self.synth.resynthesize(step.capability, spec, self.ctx,
+                                      runtime_error=err, args=args)
+        if res.ok:
+            if step.capability not in report.synthesised:
+                report.synthesised.append(step.capability)
+            report.decisions.append(
+                f"Self-healed `{step.capability}`: runtime {type(exc).__name__} fed back "
+                f"to the synthesiser; regenerated code passed selftest.")
+            return res.fn
+        report.decisions.append(
+            f"Could not repair `{step.capability}` after runtime {type(exc).__name__}: {res.error}")
+        return None
+
+    @staticmethod
+    def _dependents_note(step: Step, plan: Plan) -> str:
+        """Accurate suffix for a failed step's decision: only claim downstream
+        steps are blocked when something actually depends on this one."""
+        n = sum(1 for s in plan.steps if step.idx in s.depends_on)
+        if n == 0:
+            return "; no dependent steps"
+        return f"; {n} dependent step{'s' if n > 1 else ''} blocked"
+
     def _resolve(self, step: Step, report: ExecutionReport):
         if step.capability in BUILTINS:
             return BUILTINS[step.capability], False

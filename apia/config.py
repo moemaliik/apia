@@ -12,11 +12,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_dotenv(path: Path) -> None:
-    """Load ``path`` into the environment without clobbering existing values.
+    """Load ``path`` into the environment, overriding any existing values.
 
-    A variable already set in the real environment takes precedence over the
-    file (the same precedence python-dotenv uses), so a one-off ``set VAR=...``
-    can override the committed ``.env`` for a single run.
+    The committed ``.env`` is the source of truth: a value in the file wins
+    over a variable already set in the shell. This avoids the surprising case
+    where a stale session variable (e.g. a leftover ``APIA_LLM_PROVIDER`` from
+    an earlier experiment) silently shadows what ``.env`` plainly says.
     """
     if not path.exists():
         return
@@ -33,7 +34,7 @@ def _load_dotenv(path: Path) -> None:
             val = val[1:end] if end != -1 else val[1:]
         else:                                      # unquoted: drop a trailing ' # comment'
             val = val.split(" #", 1)[0].strip()
-        os.environ.setdefault(key, val)
+        os.environ[key] = val
 
 
 _load_dotenv(ROOT / ".env")
@@ -88,6 +89,9 @@ DB_PATH = Path(_get("APIA_DB_PATH", str(ROOT / "apia_memory.db")))
 # --- Behaviour knobs -------------------------------------------------------
 MAX_SYNTH_ATTEMPTS = int(_get("APIA_MAX_SYNTH_ATTEMPTS", "3"))
 MAX_STEP_RETRIES = int(_get("APIA_MAX_STEP_RETRIES", "2"))
+# how many times a synthesised capability may be regenerated from its own
+# RUNTIME error (the self-healing loop) before the step is declared failed
+MAX_RUNTIME_REPAIRS = int(_get("APIA_MAX_RUNTIME_REPAIRS", "2"))
 PROMOTE_AFTER = int(_get("APIA_PROMOTE_AFTER", "3"))   # successes to reach 'trusted'
 DEPRECATE_AFTER = int(_get("APIA_DEPRECATE_AFTER", "2"))  # consecutive failures to deprecate
 COMPACT_AFTER = int(_get("APIA_COMPACT_AFTER", "8"))  # detail rows per signature before compaction

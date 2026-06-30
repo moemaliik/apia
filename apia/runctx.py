@@ -15,7 +15,12 @@ class Ctx:
         self.gh = gh
         # The bare "owner/repo" string. Synthesised code may use ctx.repo, though
         # the literal {repo} token in a path is preferred (gh.request expands it).
+        # owner/repo_name are the two halves, exposed because synthesised code
+        # often reaches for them (e.g. to build a browser URL); missing them was a
+        # common source of AttributeError in otherwise-correct capabilities.
         self.repo = getattr(gh, "repo", None)
+        self.owner = self.repo.split("/")[0] if self.repo and "/" in self.repo else None
+        self.repo_name = self.repo.split("/", 1)[1] if self.repo and "/" in self.repo else None
         self.memory = memory
         self.instruction_id = instruction_id
         self._log = logger

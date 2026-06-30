@@ -43,8 +43,12 @@ HARD RULES
   test pure helper logic on an in-line literal sample WITHOUT touching ctx.gh.
 - The ONLY way to touch GitHub is ctx.gh.request(method, path, json_body=None, params=None).
   Paths use the literal token {repo}, e.g. "/repos/{repo}/issues" — write {repo}
-  verbatim; ctx.gh expands it. There is NO ctx.repo needed in paths (ctx.repo
-  exists but you should prefer the {repo} token). NEVER use ctx.gh.repo.
+  verbatim; ctx.gh expands it. Do NOT build paths from ctx.repo — prefer the
+  {repo} token. ctx.repo is the full "owner/repo" string; ctx.owner and
+  ctx.repo_name are its two halves if you need them (e.g. to build a browser
+  URL like https://github.com/{owner}/{repo_name}/issues/N). NEVER use ctx.gh.repo,
+  and do NOT invent other ctx attributes — only ctx.gh, ctx.repo, ctx.owner,
+  ctx.repo_name, ctx.known_labels(), ctx.log() exist.
 - ctx.gh.request returns the RAW GitHub JSON, NOT the wrapped shape the
   built-ins return. In particular:
     * GET /repos/{repo}/issues       -> a LIST of issue dicts (NOT {"issues":[...]})
@@ -99,7 +103,32 @@ class SynthesisAgent:
                 pass  # corrupted; fall through and re-synthesise
 
         # 2) synthesise fresh
-        last_err = None
+        return self._synthesize(name, spec, ctx)
+
+    def resynthesize(self, name: str, spec: str, ctx, runtime_error: str,
+                     args: Optional[dict] = None) -> SynthesisResult:
+        """Repair a capability that PASSED selftest but failed at RUNTIME.
+
+        The real execution error is the strongest possible signal — the selftest
+        provably did not cover the failing path — so we feed it (plus the call
+        args and the current broken source) back to the model and regenerate,
+        bypassing the cache. This is what lets a cold-memory run self-heal a buggy
+        first generation instead of dying on it.
+        """
+        cached = self.memory.get_capability(name)
+        prior = cached["source_code"] if cached else "(unavailable)"
+        seed = (f"At RUNTIME (not in selftest) the capability was called as "
+                f"capability(ctx, **{args!r}) and raised:\n  {runtime_error}\n"
+                "The selftest passed, so it did NOT exercise the failing path. Fix "
+                "the capability so this cannot happen and make it defensive about the "
+                "inputs shown. Write a selftest that actually CALLS capability(ctx, ...) "
+                "rather than re-implementing its logic, so the real path is covered.\n"
+                f"--- current (broken) code ---\n{prior}\n--- end ---")
+        return self._synthesize(name, spec, ctx, seed_err=seed)
+
+    def _synthesize(self, name: str, spec: str, ctx,
+                    seed_err: Optional[str] = None) -> SynthesisResult:
+        last_err = seed_err
         for attempt in range(1, config.MAX_SYNTH_ATTEMPTS + 1):
             user = self._prompt(name, spec, last_err)
             raw = self.llm.complete(SYNTH_SYSTEM, user,
@@ -123,6 +152,7 @@ class SynthesisAgent:
                 "model": self.llm.model,
                 "attempts": attempt,
                 "composed_from": "ctx.gh primitives",
+                "repaired_from_runtime_error": seed_err is not None,
             }
             self.memory.save_capability(name, spec, source, provenance)
             return SynthesisResult(ok=True, name=name, source=source, fn=module_fn,

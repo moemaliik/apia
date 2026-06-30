@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from . import config
 from .executor import ExecutionAgent
-from .llm import LLM
+from .llm import LLM, LLMError
 from .memory import Memory
 from .metrics import Meter
 from .planner import PlannerAgent

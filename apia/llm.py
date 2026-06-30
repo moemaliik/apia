@@ -13,6 +13,7 @@ and so the test-suite runs with zero API spend. Real providers ignore cache_key.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -55,10 +56,34 @@ class LLM:
             return self._gemini(system, user, max_tokens, temperature)
         raise LLMError(f"unknown provider {self.provider!r}")
 
-    def complete_json(self, system: str, user: str, **kw) -> dict | list:
-        raw = self.complete(system + "\n\nRespond with ONLY valid JSON, no prose, no code fences.",
-                            user, **kw)
-        return _parse_json(raw)
+    def complete_json(self, system: str, user: str, *, cache_key: Optional[str] = None,
+                      max_tokens: int = 1500, temperature: float = 0.0,
+                      repair_attempts: int = 2) -> dict | list:
+        sys = system + "\n\nRespond with ONLY valid JSON, no prose, no code fences."
+        raw = self.complete(sys, user, cache_key=cache_key,
+                            max_tokens=max_tokens, temperature=temperature)
+        try:
+            return _parse_json(raw)
+        except (json.JSONDecodeError, ValueError) as err:
+            # Even a capable model occasionally emits invalid JSON (an unescaped
+            # quote or a raw newline inside a long string). Rather than crash the
+            # whole run, show the model its own broken output plus the parser
+            # error and ask for strict JSON. This recovers the common case; if it
+            # still can't, we raise LLMError so callers (e.g. agent.run) can fail
+            # gracefully instead of surfacing a raw JSONDecodeError traceback.
+            for _ in range(repair_attempts):
+                repair = (f"{user}\n\nYour previous reply was NOT valid JSON and failed to "
+                          f"parse with: {err}\n--- your reply ---\n{raw}\n--- end ---\n"
+                          "Return the SAME content as STRICTLY valid JSON only. Escape every "
+                          "quote and newline inside string values. No prose, no code fences.")
+                raw = self.complete(sys, repair, cache_key=None,
+                                    max_tokens=max_tokens, temperature=temperature)
+                try:
+                    return _parse_json(raw)
+                except (json.JSONDecodeError, ValueError) as e2:
+                    err = e2
+            raise LLMError(f"model did not return valid JSON after {repair_attempts} "
+                           f"repair attempt(s): {err}")
 
     # -- providers ---------------------------------------------------------
     def _anthropic(self, system, user, max_tokens, temperature) -> str:
@@ -159,6 +184,12 @@ def _parse_json(raw: str) -> dict | list:
         start = min((raw.find("{") if "{" in raw else len(raw)),
                     (raw.find("[") if "[" in raw else len(raw)))
         end = max(raw.rfind("}"), raw.rfind("]"))
-        if start < end:
-            return json.loads(raw[start:end + 1])
-        raise
+        if start >= end:
+            raise
+        candidate = raw[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            # Cheap local repair for the most common LLM slip — a trailing comma
+            # before a closing ] or } — so we don't burn an LLM round-trip on it.
+            return json.loads(re.sub(r",(\s*[}\]])", r"\1", candidate))
