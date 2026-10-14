@@ -10,7 +10,9 @@ Memory makes this cheaper over time:
 """
 from __future__ import annotations
 
+import json
 import re
+from typing import Optional
 
 from .llm import LLM
 from .platform.base_capabilities import BUILTIN_SIGNATURES
@@ -67,6 +69,13 @@ Return ONLY the JSON array.""" % "\n".join(
     f"  {k}{v}" for k, v in BUILTIN_SIGNATURES.items())
 
 
+# a quoted value in an instruction; group 1 is the value without its quotes
+_LITERAL = r"['\"`](.*?)['\"`]"
+# quoted values shorter than this are only replaced when they are a whole arg,
+# never as a substring (avoids rewriting e.g. 'x' inside unrelated text)
+_MIN_SUBSTR = 3
+
+
 class PlannerAgent:
     def __init__(self, llm: LLM, memory):
         self.llm = llm
@@ -75,18 +84,106 @@ class PlannerAgent:
     @staticmethod
     def signature(instruction: str) -> str:
         """Normalised intent key: lowercase, strip numbers/quotes/punctuation and
-        collapse whitespace so 'create issue X' and 'create issue Y' collide."""
+        collapse whitespace so 'create issue X' and 'create issue Y' collide.
+
+        The WHOLE instruction is kept. An earlier version truncated to the first
+        12 tokens, which made instructions that only differ at the end (e.g.
+        '...group by age and create a summary' vs '...group by age and close
+        every one') share a signature and therefore a reused plan."""
         s = instruction.lower()
-        s = re.sub(r"['\"`].*?['\"`]", " qstr ", s)
+        s = re.sub(_LITERAL, " qstr ", s)
         s = re.sub(r"\d+", " qnum ", s)
         s = re.sub(r"[^a-z ]", " ", s)
-        s = re.sub(r"\s+", " ", s).strip()
-        # keep the salient verbs/nouns only — first 12 tokens is plenty for intent
-        return " ".join(s.split()[:12])
+        return re.sub(r"\s+", " ", s).strip()
+
+    # ---- plan parameters ------------------------------------------------
+    # The signature erases literals ('Login fails' -> qstr) so that plans can be
+    # reused across instructions that differ only in their values. That means a
+    # saved plan must not carry the OLD values either: they are lifted out into
+    # numbered parameters when the plan is saved and re-bound from the NEW
+    # instruction when it is reused.
+
+    @staticmethod
+    def literals(instruction: str) -> list[str]:
+        """Quoted strings and bare numbers, in the order the signature erases them."""
+        out = []
+        for m in re.finditer(_LITERAL + r"|(\d+)", instruction):
+            out.append(m.group(1) if m.group(1) is not None else m.group(2))
+        return out
+
+    @staticmethod
+    def parameterise(steps: list[dict], literals: list[str]) -> dict:
+        """Replace values that came from the instruction with {"$param": i}
+        (whole value) or {"$tmpl": "...{{$i}}..."} (value embedded in a string)."""
+        quoted = sorted(((i, l) for i, l in enumerate(literals)
+                         if not l.isdigit() and len(l) >= _MIN_SUBSTR),
+                        key=lambda p: -len(p[1]))
+
+        def walk(v):
+            if isinstance(v, dict):
+                return {k: walk(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [walk(x) for x in v]
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, int):
+                for i, l in enumerate(literals):
+                    if l.isdigit() and int(l) == v:
+                        return {"$param": i, "type": "int"}
+                return v
+            if isinstance(v, str):
+                for i, l in enumerate(literals):
+                    if v == l:
+                        return {"$param": i}
+                t = v
+                for i, l in quoted:
+                    t = t.replace(l, "{{$%d}}" % i)
+                return {"$tmpl": t} if t != v else v
+            return v
+
+        return {"literals": list(literals),
+                "steps": [{**s, "args": walk(s.get("args", {})),
+                           "description": walk(s.get("description", ""))}
+                          for s in steps]}
+
+    @staticmethod
+    def bind(saved, literals: list[str]) -> Optional[list[dict]]:
+        """Fill a saved plan's parameters from the new instruction's literals.
+        Returns None when the plan can't be reused SAFELY, so the caller replans:
+          - a legacy (un-parameterised) plan and the instruction has literals,
+          - the literal count differs,
+          - an old value would survive into the new plan's args."""
+        if isinstance(saved, list):                      # pre-parameterisation format
+            return saved if not literals else None
+        old, steps = saved.get("literals", []), saved.get("steps", [])
+        if len(old) != len(literals):
+            return None
+
+        def fill(v):
+            if isinstance(v, dict):
+                if "$param" in v:
+                    x = literals[v["$param"]]
+                    return int(x) if v.get("type") == "int" else x
+                if "$tmpl" in v:
+                    return re.sub(r"\{\{\$(\d+)\}\}",
+                                  lambda m: literals[int(m.group(1))], v["$tmpl"])
+                return {k: fill(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [fill(x) for x in v]
+            return v
+
+        bound = [{**s, "args": fill(s.get("args", {})),
+                  "description": fill(s.get("description", ""))} for s in steps]
+        stale = {l for l in old if len(l) >= _MIN_SUBSTR and not l.isdigit()} - set(literals)
+        blob = json.dumps([s["args"] for s in bound])
+        if any(json.dumps(l)[1:-1] in blob for l in stale):
+            return None
+        return bound
 
     def plan(self, instruction: str) -> Plan:
         sig = self.signature(instruction)
-        reused = self.memory.find_reusable_plan(sig)
+        saved = self.memory.find_reusable_plan(sig)
+        reused = self.bind(saved, self.literals(instruction)) if saved else None
         if reused:
             steps = [Step(**{k: v for k, v in s.items()
                             if k in Step.__dataclass_fields__}) for s in reused]

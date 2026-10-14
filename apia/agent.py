@@ -67,9 +67,13 @@ class Agent:
         ex = ExecutionAgent(gh, llm, self.memory, iid, self._log)
         report = ex.run(plan)
 
-        # save reusable plan only if the whole thing succeeded
-        self.memory.save_plan(sig, iid, plan.to_dict()["steps"],
-                              succeeded=(report.status == "success"))
+        # save reusable plan only if the whole thing succeeded; values taken from
+        # the instruction are stored as parameters so reuse re-binds them
+        self.memory.save_plan(
+            sig, iid,
+            PlannerAgent.parameterise(plan.to_dict()["steps"],
+                                      PlannerAgent.literals(instruction)),
+            succeeded=(report.status == "success"))
 
         # reflect only when it could change future behaviour
         if report.failed or report.synthesised or report.constraints_learned or plan.source == "fresh":

@@ -3,11 +3,17 @@ agent run end-to-end (and reproducibly) with APIA_LLM_PROVIDER=replay. Run once:
     python scripts/make_replay.py
 """
 import json
+import sys
 from pathlib import Path
 
-SIG1 = "create an issue titled qstr and label it bug"
-SIG2 = "find all open issues with no assignee and add the qstr label"
-SIG3 = "find all open unlabeled issues group them by age this week this"
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from apia.planner import PlannerAgent  # noqa: E402
+from run import DEMO  # noqa: E402
+
+# derived, not hardcoded, so the replay keys can't drift from the planner
+SIG1, SIG2, SIG3 = (PlannerAgent.signature(d) for d in DEMO)
 
 plan1 = [
     {"description": "Ensure the 'bug' label exists", "capability": "create_label",
@@ -148,6 +154,6 @@ responses = {
         "Reuse filter_unlabeled + bucket_issues_by_age for triage summaries."]),
 }
 
-out = Path(__file__).resolve().parent.parent / "apia" / "replay" / "responses.json"
+out = ROOT / "apia" / "replay" / "responses.json"
 out.write_text(json.dumps(responses, indent=2))
 print(f"wrote {out} ({len(responses)} keys)")

@@ -147,8 +147,10 @@ class Memory:
         )
         self.db.commit()
 
-    def find_reusable_plan(self, signature: str) -> Optional[list[dict]]:
-        """Return the most recent *successful* decomposition for this signature."""
+    def find_reusable_plan(self, signature: str) -> Optional[dict | list[dict]]:
+        """Return the most recent *successful* decomposition for this signature:
+        a parameterised {"literals", "steps"} dict (see PlannerAgent.parameterise),
+        or a bare step list for plans saved before parameterisation."""
         row = self.db.execute(
             "SELECT steps_json FROM plans WHERE signature=? AND succeeded=1 "
             "ORDER BY id DESC LIMIT 1",
@@ -156,7 +158,7 @@ class Memory:
         ).fetchone()
         return json.loads(row["steps_json"]) if row else None
 
-    def save_plan(self, signature: str, iid: int, steps: list[dict], succeeded: bool) -> None:
+    def save_plan(self, signature: str, iid: int, steps: dict | list[dict], succeeded: bool) -> None:
         self.db.execute(
             "INSERT INTO plans (signature, instruction_id, steps_json, succeeded, created_at) "
             "VALUES (?,?,?,?,?)",

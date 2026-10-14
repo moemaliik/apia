@@ -72,7 +72,11 @@ label, and skips writes to already-labelled issues.
 
 Signature matching is a normalised-text key, not embeddings — transparent and
 dependency-free, at the cost of not generalising across very differently-worded
-but equivalent instructions. The sandbox is an allowlist suitable for
+but equivalent instructions. Because the key erases quoted values and numbers,
+a saved plan stores those values as numbered parameters and reuse re-binds them
+from the new instruction; if an old value would still survive into the reused
+plan's arguments, the planner refuses the reuse and plans fresh instead of
+risking a stale write. The sandbox is an allowlist suitable for
 semi-trusted LLM output, not a hostile-code boundary (no seccomp/containers).
 The mock transport enforces the constraints we rely on (422 on duplicate label,
 404 on missing issue) but is not a full GitHub emulation.

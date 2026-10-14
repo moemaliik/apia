@@ -104,6 +104,50 @@ def test_capability_promoted_to_trusted():
     agent.close()
 
 
+def test_reused_plan_rebinds_new_values():
+    """Regression: reuse used to replay the OLD title verbatim, creating a
+    duplicate 'Login times out...' issue for a different instruction."""
+    db = Path(tempfile.mkdtemp()) / "test.db"
+    mem, tr = Memory(db), MockTransport()
+    agent = Agent(memory=mem, verbose=False, transport=tr)
+    agent.run(DEMO[0])
+    before = [i["title"] for i in tr.issues.values()]
+    rep = agent.run("Create an issue titled 'Payment page crashes on submit' and label it bug")
+    after = [i["title"] for i in tr.issues.values()]
+    assert rep.status == "success", rep.failed
+    assert rep.metrics["llm_calls"] == 0, rep.metrics     # still a free reuse
+    new = [t for t in after if t not in before or after.count(t) > before.count(t)]
+    assert new == ["Payment page crashes on submit"], new
+    agent.close()
+
+
+def test_signature_keeps_the_whole_instruction():
+    """Regression: signatures were cut at 12 tokens, so these two shared a plan."""
+    base = ("Find all open unlabeled issues, group them by age (this week / "
+            "this month / older), and ")
+    a = PlannerAgent.signature(base + "create one triage summary issue")
+    b = PlannerAgent.signature(base + "close every one of them")
+    assert a != b, a
+
+
+def test_bind_refuses_unsafe_reuse():
+    lits = PlannerAgent.literals("Create an issue titled 'Old title' and label it bug")
+    assert lits == ["Old title"], lits
+    saved = PlannerAgent.parameterise(
+        [{"idx": 0, "description": "Create 'Old title'", "capability": "create_issue",
+          "args": {"title": "Old title", "body": "About Old title", "color": "d73a4a"}}], lits)
+    bound = PlannerAgent.bind(saved, ["New title"])
+    assert bound[0]["args"] == {"title": "New title", "body": "About New title",
+                                "color": "d73a4a"}, bound
+    # an old value that was NOT lifted into a parameter (e.g. the model
+    # paraphrased it into another arg) must force a fresh plan, not a stale write
+    saved["steps"][0]["args"]["note"] = "Old title"
+    assert PlannerAgent.bind(saved, ["New title"]) is None
+    # legacy, un-parameterised plans are only reused when there is nothing to re-bind
+    assert PlannerAgent.bind([{"args": {}}], ["x"]) is None
+    assert PlannerAgent.bind([{"args": {}}], []) == [{"args": {}}]
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
